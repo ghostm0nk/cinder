@@ -1,89 +1,91 @@
--- Create the teams table
-CREATE TABLE IF NOT EXISTS teams (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    name TEXT NOT NULL,
-    created_at TIMESTAMPTZ DEFAULT NOW()
-);
-ALTER TABLE teams ENABLE ROW LEVEL SECURITY;
-CREATE POLICY "Authenticated users can view teams" ON teams FOR SELECT USING (auth.uid() IS NOT NULL);
-CREATE POLICY "Authenticated users can create teams" ON teams FOR INSERT WITH CHECK (auth.uid() IS NOT NULL);
-CREATE POLICY "Authenticated users can update teams" ON teams FOR UPDATE USING (auth.uid() IS NOT NULL);
-CREATE POLICY "Authenticated users can delete teams" ON teams FOR DELETE USING (auth.uid() IS NOT NULL);
-
--- Create the profiles table
+-- profiles table for user metadata
 CREATE TABLE IF NOT EXISTS profiles (
     id UUID REFERENCES auth.users(id) ON DELETE CASCADE PRIMARY KEY,
-    email TEXT,
-    username TEXT,
-    team_id UUID REFERENCES teams(id) DEFAULT NULL, -- Link to teams table, optional initially
+    email TEXT UNIQUE,
+    username TEXT UNIQUE,
     created_at TIMESTAMPTZ DEFAULT NOW()
 );
+
+-- Enable Row Level Security for profiles table
 ALTER TABLE profiles ENABLE ROW LEVEL SECURITY;
+
+-- Policy for users to view their own profile
 CREATE POLICY "Users can view own profile" ON profiles FOR SELECT USING (auth.uid() = id);
+
+-- Policy for users to update their own profile
 CREATE POLICY "Users can update own profile" ON profiles FOR UPDATE USING (auth.uid() = id);
 
--- Create the customers table
-CREATE TABLE IF NOT EXISTS customers (
+-- Policy for users to create their own profile (via a trigger or function)
+-- This policy allows inserts for authenticated users if the id matches auth.uid()
+CREATE POLICY "Users can create own profile" ON profiles FOR INSERT WITH CHECK (auth.uid() = id);
+
+-- users table for task assignment purposes (distinct from auth.users)
+CREATE TABLE IF NOT EXISTS users (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     name TEXT NOT NULL,
-    email TEXT,
-    status TEXT,
-    notes TEXT,
-    team_id UUID REFERENCES teams(id),
+    email TEXT UNIQUE NOT NULL,
     created_at TIMESTAMPTZ DEFAULT NOW()
 );
-ALTER TABLE customers ENABLE ROW LEVEL SECURITY;
-CREATE POLICY "Authenticated users can view customers" ON customers FOR SELECT USING (auth.uid() IS NOT NULL);
-CREATE POLICY "Authenticated users can insert customers" ON customers FOR INSERT WITH CHECK (auth.uid() IS NOT NULL);
-CREATE POLICY "Authenticated users can update customers" ON customers FOR UPDATE USING (auth.uid() IS NOT NULL);
-CREATE POLICY "Authenticated users can delete customers" ON customers FOR DELETE USING (auth.uid() IS NOT NULL);
 
--- Create the leads table
-CREATE TABLE IF NOT EXISTS leads (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    contact_name TEXT NOT NULL,
-    company TEXT,
-    status TEXT,
-    source TEXT,
-    team_id UUID REFERENCES teams(id),
-    created_at TIMESTAMPTZ DEFAULT NOW()
-);
-ALTER TABLE leads ENABLE ROW LEVEL SECURITY;
-CREATE POLICY "Authenticated users can view leads" ON leads FOR SELECT USING (auth.uid() IS NOT NULL);
-CREATE POLICY "Authenticated users can insert leads" ON leads FOR INSERT WITH CHECK (auth.uid() IS NOT NULL);
-CREATE POLICY "Authenticated users can update leads" ON leads FOR UPDATE USING (auth.uid() IS NOT NULL);
-CREATE POLICY "Authenticated users can delete leads" ON leads FOR DELETE USING (auth.uid() IS NOT NULL);
+-- Enable Row Level Security for users table
+ALTER TABLE users ENABLE ROW LEVEL SECURITY;
 
--- Create the tasks table
+-- Policy for authenticated users to view all assignable users
+CREATE POLICY "Authenticated users can view users" ON users FOR SELECT USING (auth.role() = 'authenticated');
+
+-- Policy for authenticated users to create users (e.g., team members)
+CREATE POLICY "Authenticated users can create users" ON users FOR INSERT WITH CHECK (auth.role() = 'authenticated');
+
+-- Policy for authenticated users to update users
+CREATE POLICY "Authenticated users can update users" ON users FOR UPDATE USING (auth.role() = 'authenticated');
+
+-- Policy for authenticated users to delete users
+CREATE POLICY "Authenticated users can delete users" ON users FOR DELETE USING (auth.role() = 'authenticated');
+
+-- tasks table
 CREATE TABLE IF NOT EXISTS tasks (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id UUID REFERENCES profiles(id) ON DELETE CASCADE NOT NULL, -- The user who created the task
     title TEXT NOT NULL,
-    due_date DATE,
-    status TEXT,
-    assigned_to UUID REFERENCES profiles(id),
-    team_id UUID REFERENCES teams(id),
-    related_to_customer_id UUID REFERENCES customers(id), -- Nullable for tasks not related to a specific customer
-    related_to_lead_id UUID REFERENCES leads(id),         -- Nullable for tasks not related to a specific lead
-    created_at TIMESTAMPTZ DEFAULT NOW()
-);
-ALTER TABLE tasks ENABLE ROW LEVEL SECURITY;
-CREATE POLICY "Authenticated users can view tasks" ON tasks FOR SELECT USING (auth.uid() IS NOT NULL);
-CREATE POLICY "Authenticated users can insert tasks" ON tasks FOR INSERT WITH CHECK (auth.uid() IS NOT NULL);
-CREATE POLICY "Authenticated users can update tasks" ON tasks FOR UPDATE USING (auth.uid() IS NOT NULL);
-CREATE POLICY "Authenticated users can delete tasks" ON tasks FOR DELETE USING (auth.uid() IS NOT NULL);
-
--- Create the activities table
-CREATE TABLE IF NOT EXISTS activities (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    type TEXT NOT NULL,
     description TEXT,
-    timestamp TIMESTAMPTZ DEFAULT NOW(),
-    team_id UUID REFERENCES teams(id),
-    related_to_customer_id UUID REFERENCES customers(id), -- Nullable
-    related_to_lead_id UUID REFERENCES leads(id)          -- Nullable
+    status TEXT NOT NULL DEFAULT 'Open', -- e.g., 'Open', 'In Progress', 'Completed'
+    due_date DATE,
+    assigned_to UUID REFERENCES users(id) ON DELETE SET NULL, -- The user assigned to the task
+    priority TEXT NOT NULL DEFAULT 'Medium', -- e.g., 'Low', 'Medium', 'High'
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    updated_at TIMESTAMPTZ DEFAULT NOW()
 );
-ALTER TABLE activities ENABLE ROW LEVEL SECURITY;
-CREATE POLICY "Authenticated users can view activities" ON activities FOR SELECT USING (auth.uid() IS NOT NULL);
-CREATE POLICY "Authenticated users can insert activities" ON activities FOR INSERT WITH CHECK (auth.uid() IS NOT NULL);
-CREATE POLICY "Authenticated users can update activities" ON activities FOR UPDATE USING (auth.uid() IS NOT NULL);
-CREATE POLICY "Authenticated users can delete activities" ON activities FOR DELETE USING (auth.uid() IS NOT NULL);
+
+-- Enable Row Level Security for tasks table
+ALTER TABLE tasks ENABLE ROW LEVEL SECURITY;
+
+-- Policy for users to view their own tasks
+CREATE POLICY "Users can view own tasks" ON tasks FOR SELECT USING (auth.uid() = user_id OR auth.uid() = assigned_to);
+
+-- Policy for users to create tasks
+CREATE POLICY "Users can create tasks" ON tasks FOR INSERT WITH CHECK (auth.uid() = user_id);
+
+-- Policy for users to update their own tasks (and tasks assigned to them)
+CREATE POLICY "Users can update own tasks" ON tasks FOR UPDATE USING (auth.uid() = user_id OR auth.uid() = assigned_to);
+
+-- Policy for users to delete their own tasks
+CREATE POLICY "Users can delete own tasks" ON tasks FOR DELETE USING (auth.uid() = user_id);
+
+-- Function to set updated_at timestamp
+CREATE OR REPLACE FUNCTION update_timestamp()
+RETURNS TRIGGER AS $$
+BEGIN
+    NEW.updated_at = NOW();
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+-- Trigger to update updated_at on task changes
+CREATE TRIGGER update_tasks_updated_at
+BEFORE UPDATE ON tasks
+FOR EACH ROW
+EXECUTE FUNCTION update_timestamp();
+
+-- Optional: Create a trigger to automatically create a profile for new auth.users
+-- This is often handled in a Supabase Edge Function or a database hook
+-- For simplicity, we'll assume the client-side handles profile creation after signup.
